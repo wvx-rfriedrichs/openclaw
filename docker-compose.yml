@@ -11,21 +11,80 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+      - homebrew_data:/home/linuxbrew/.linuxbrew
     ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
-      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "127.0.0.1:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+    user: root
     init: true
     restart: unless-stopped
     command:
-      [
-        "node",
-        "dist/index.js",
-        "gateway",
-        "--bind",
-        "${OPENCLAW_GATEWAY_BIND:-lan}",
-        "--port",
-        "18789",
-      ]
+      - sh
+      - -c
+      - |
+        # Add node user to docker group for sandbox support
+        DOCKER_GID=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo "")
+        if [ -n "$$DOCKER_GID" ]; then
+          if [ "$$DOCKER_GID" -eq 0 ]; then
+            # Docker Desktop on Windows: socket owned by root (GID 0)
+            # Add node to root group and ensure group read/write
+            usermod -aG root node 2>/dev/null || true
+            chmod 660 /var/run/docker.sock 2>/dev/null || true
+          else
+            groupadd -g $$DOCKER_GID docker 2>/dev/null || true
+            usermod -aG docker node 2>/dev/null || true
+          fi
+        fi
+
+        # Install Docker CLI if not present
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "Installing Docker CLI..."
+          curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.4.1.tgz -o /tmp/docker.tgz
+          tar -xzf /tmp/docker.tgz -C /tmp
+          cp /tmp/docker/docker /usr/local/bin/
+          chmod +x /usr/local/bin/docker
+          rm -rf /tmp/docker /tmp/docker.tgz
+        fi
+
+        # Build sandbox image if not present
+        if ! docker image inspect openclaw-sandbox:bookworm-slim >/dev/null 2>&1; then
+          echo "Building sandbox image..."
+          cd /app && ./scripts/sandbox-setup.sh
+        fi
+
+        # Add node user to linuxbrew group for skill installation
+        groupadd -g 1001 linuxbrew 2>/dev/null || true
+        usermod -aG linuxbrew node 2>/dev/null || true
+
+        # Install Homebrew if not present
+        if [ ! -f /home/linuxbrew/.linuxbrew/bin/brew ]; then
+          echo "Installing Homebrew..."
+          useradd -m -s /bin/bash -u 1001 -g 1001 linuxbrew 2>/dev/null || true
+          mkdir -p /home/linuxbrew/.cache/Homebrew
+          chown -R linuxbrew:linuxbrew /home/linuxbrew/.linuxbrew /home/linuxbrew/.cache
+          su linuxbrew -c 'NONINTERACTIVE=1 /bin/bash -c "$$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+        fi
+        # Ensure linuxbrew user exists (for subsequent starts)
+        useradd -m -s /bin/bash -u 1001 -g 1001 linuxbrew 2>/dev/null || true
+        chown -R linuxbrew:linuxbrew /home/linuxbrew/.linuxbrew 2>/dev/null || true
+        chown -R linuxbrew:linuxbrew /home/linuxbrew/.cache 2>/dev/null || true
+        # Grant group write so node (in linuxbrew group) can use brew
+        chmod -R g+w /home/linuxbrew/.linuxbrew 2>/dev/null || true
+
+        # Ensure node user can do global npm installs (for npm-based skills)
+        mkdir -p /usr/local/lib/node_modules
+        chown -R node:node /usr/local/lib/node_modules /usr/local/bin
+
+        # Patch: allow null-origin WebSocket from trusted proxies (Cloudflare Tunnel)
+        GWJS=/app/dist/gateway-cli-BEugYjHm.js
+        if [ -f "$$GWJS" ] && grep -q 'if (!originCheck.ok) {' "$$GWJS"; then
+          sed -i 's/if (!originCheck\.ok) {/if (!originCheck.ok \&\& !isLocalClient \&\& !remoteIsTrustedProxy) {/' "$$GWJS"
+          echo "Applied origin-check patch for Cloudflare Tunnel"
+        fi
+
+        # Start the gateway as node user
+        exec su node -c "node dist/index.js gateway --bind $${OPENCLAW_GATEWAY_BIND:-lan} --port 18789"
 
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}
@@ -44,3 +103,6 @@ services:
     tty: true
     init: true
     entrypoint: ["node", "dist/index.js"]
+
+volumes:
+  homebrew_data:
