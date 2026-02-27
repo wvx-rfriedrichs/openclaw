@@ -8,6 +8,12 @@ services:
       CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY}
       CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY}
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE}
+      # Enable Happy Eyeballs for Telegram (fixes IPv6 issues in WSL2 Docker)
+      # Node 22 disables autoSelectFamily by default, causing immediate IPv6 failures
+      # Setting to true allows fallback to IPv4 when IPv6 is unavailable
+      OPENCLAW_TELEGRAM_ENABLE_AUTO_SELECT_FAMILY: "1"
+      # Ollama integration (hardcoded to 127.0.0.1:11434 in OpenClaw, socat forwards to ollama container)
+      OLLAMA_API_KEY: "ollama"
     volumes:
       - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
@@ -19,6 +25,13 @@ services:
     user: root
     init: true
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     command:
       - sh
       - -c
@@ -76,6 +89,12 @@ services:
         mkdir -p /usr/local/lib/node_modules
         chown -R node:node /usr/local/lib/node_modules /usr/local/bin
 
+        # Forward 127.0.0.1:11434 → ollama container (OpenClaw hardcodes this address)
+        if ! command -v socat >/dev/null 2>&1; then
+          apt-get update -qq && apt-get install -y -qq socat 2>/dev/null
+        fi
+        socat TCP-LISTEN:11434,bind=127.0.0.1,fork,reuseaddr TCP:ollama:11434 &
+
         # Patch: allow null-origin WebSocket from trusted proxies (Cloudflare Tunnel)
         GWJS=/app/dist/gateway-cli-BEugYjHm.js
         if [ -f "$$GWJS" ] && grep -q 'if (!originCheck.ok) {' "$$GWJS"; then
@@ -84,7 +103,8 @@ services:
         fi
 
         # Start the gateway as node user
-        exec su node -c "node dist/index.js gateway --bind $${OPENCLAW_GATEWAY_BIND:-lan} --port 18789"
+        # OPENCLAW_TELEGRAM_ENABLE_AUTO_SELECT_FAMILY must be passed inline (su strips env)
+        exec su node -c "OPENCLAW_TELEGRAM_ENABLE_AUTO_SELECT_FAMILY=1 node dist/index.js gateway --bind $${OPENCLAW_GATEWAY_BIND:-lan} --port 18789"
 
   openclaw-cli:
     image: ${OPENCLAW_IMAGE:-openclaw:local}

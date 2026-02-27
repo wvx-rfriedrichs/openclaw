@@ -24,10 +24,13 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
       - DOCS_CONTENT_EXTRACTION_ENGINE=docling
       - DOCLING_SERVER_URL=http://docling:5001
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://qdrant:6333
     volumes:
       - open_webui_data:/app/backend/data
     depends_on:
       - ollama
+      - qdrant
     restart: unless-stopped
 
   docling:
@@ -37,6 +40,28 @@ services:
       - "127.0.0.1:5001:5001"
     restart: unless-stopped
 
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    command: --admin-password '$$2b$$10$$gxP.S.wPK25usJc7yFNswO8zLPXAjtp71HaXywxL5B5jun20bSa02'
+    restart: unless-stopped
+
 volumes:
   ollama_data:
   open_webui_data:
+  qdrant_data:
+  portainer_data:
